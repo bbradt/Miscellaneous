@@ -1,0 +1,433 @@
+---
+title: "Meteorite"
+author: "Bradley Baker"
+output: word_document
+---
+# Statistical Inference Final Project : Meteorites
+
+## Inroduction
+
+###Vignette
+I spent last summer in the desert, working for the Mind Research Network in Albuquerque, New Mexico on a problem in distributed fMRI data analysis[see my portfolio, entry 3](). Though that particular job found me wrapped almost entirely _in silico_, on my offtime, I had the opportunity to embed myself in various outdoor locations in the southwest. Though most of this involved hiking and exploration of the mountains, wood, and desert areas, on one night toward the end of the trip, I turned my head up to the stars. When a colleague and I visited a meeting of the [Albuquerque Astronomical Society](http://www.taas.org/), we were first amazed by the huge turn-out to a solitary location far in the mountains. A clearing in the woods teamed with casual and professional astronomers, some setting up expensive telescopes, and others just embracing the yawning blanket of stars above us. One guide, a nucleus of authority surrounded by a cell of interested casual observers, gestured excitedly with small handheld laser-pointer, marking out the locations of constellations, planets, nebulae, and more. 
+
+My colleague and I, being entirely foreign to the society, mostly hung around the edges of larger groups, listening to the most knowledgeable members of the society describe the night sky with fantastic names, describing the phenomena, sometimes providing historical epithets regarding the particular astronomer known for first doing what they did now. Toward the end of the night, my colleague and I struck up a conversation with one of the owners of one of the largest telescopes set up in the clearing. It turns out that he had also worked as a data-scientist, and though he had focused mainly on robotics and artifical intelligence, he recounted the few exciting days he once worked for NASA, wistfully claiming that he realized far too late his true interest was hanging far above the earth. 
+
+That night, I experienced a moment of crystallization in the field I had, up to this point, been somewhat blindly pursuing, because the opportunities had led to it, because I was good at it. Data science really is everywhere - even in the stars - and though my own personal dreams of becoming an astronomer or astrophysicist were probably long gone at this point, my studies of applied math, machine learning, and data mining had given me tools which would allow me to explore, at least in some way, some of the objects of which I had once only dreamed. 
+
+### The Data
+
+Anyone with even a casual interest in astronomy will regularly encounter statistics regarding cosmological phenomena, which aim to infer information about the behavior of said phenomena, perhaps for the purpose of aiding in prediction of these phenomena, for describing their behavior. 
+
+Interested in the kind of statistical analyses which might be useful for tracking cosmological phenomenon, I came across a possible project investigating data taken on meteorites, that is, meteors which have fallen to earth. Particularly, I found myself asking questions regarding the rates at which meteorites have fallen throughout the past few decades, regarding whether or not certain locations seem to experience a far greater number of meteorite impacts, and others. 
+
+Thus to the end of answering these initial guiding questions, in this project, I explore data from the NASA's online databases.
+Namely, I investigate the [meteorite landings dataset](https://data.nasa.gov/Space-Science/Meteorite-Landings/gh4g-9sfh) available online. 
+This dataset included 45,717 individual records of meteorites and meteorite fragments, identified to a time period spanning **2500 B.C.E to 2013 A.D.E**. It represents data collected by the meteorological society, and though the NASA website claims that the Meteorological society has an updated version of this dataset, I could not find it available online without some serious webscraping involved. 
+
+The original dataset included ten variables with the following labels:
+name (string) - the given name of the meteorite
+id (integer) - the Identification number used in the dataset
+nametype (string) - whether or not the name has been recognized as valid or __relict__(i.e. meteorites "which are dominantly (>95%) composed of secondary minerals formed on the body on which the object was found"[Guidelines for meteorite nomenclature,  §1.2c](http://meteoriticalsociety.org/?page_id=59))
+recclass (string) - a classification of the meteorite which gives information about its chemical composition, structure, etc
+mass (g) (numeric) - the mass of the object in grams
+year (string) - in the format MM/DD/YY 00:00:00 AM. Most entries just give the date of 01/01/YY 12:00:00 AM. 
+reclat - recovery latitude
+reclong - recovery longitude
+Geolocation - a touple of (reclat, reclong)
+
+Initially, this dataset needs __a lot__ of cleaning. Many records are missing, and many others are just unclear or not useful. 
+
+First, though - here are my external source files and working directory setups
+```{r,echo=FALSE}
+setwd("C:/Users/Brad/Desktop/INFER") #needs to be changed for submission
+#This R script contains functions I wrote to make some tasks simpler. I will give brief descriptions of those functions when I use them, but otherwise won't talk about them much. 
+source("meteor_helper.R")
+library(stringr)
+library(beepr)
+library(knitr)
+library(BayesianFirstAid)
+library(boot)
+library(sandwich)
+library(e1071)
+#Set working directory
+
+```
+
+The dataset was downloaded as a CSV, and cast into a data frame.
+```{r,echo=FALSE}
+raw_dataset <- read.csv('meteor.csv',header=TRUE)
+raw_dataset <- data.frame(raw_dataset)
+str(raw_dataset)
+summary(raw_dataset)
+```
+
+I can get rid of some of the columns from the original dataset. 
+Really, only the name, mass, year, location, and the kind of meteorite are useful. The validity of the name doesn't seem to be something I'd want to measure.  I also drop the toupled GeoLocation column, because it will be easier to parse the individual columns, rather than a touple.
+I also change some of the column names for simplicity's sake. 
+Finally, I clean up the **year** column of the data, such that the levels for that column are only the years themselves, and we don't have to deal with inconsistently collected times-of-day+days+months.
+```{r}
+#changing column names
+colnames(raw_dataset)[1] <- 'name'
+colnames(raw_dataset)[5] <- 'mass'
+
+#subset of the data, limited for useful columns
+limited_dataset <- raw_dataset[,c('name','recclass','mass','year','reclat','reclong')]
+
+#parsing the year column to extract just the year
+for (date in levels(limited_dataset$year)){#data is a string of format "MM/DD/YYYY HH:MM:SS AM"
+  if (date != "" && date != "NA"){ #some dates are empty or NAs
+    new_date <- "NA"  #make sure all empties become NAs  
+  }
+  else{ #the date is there
+    new_date <- unlist(str_split(date,"/"))[3] #split on the / in the date, and take whatever follows the second split
+    new_date <- unlist(str_split(new_date," "))[1] #and then split on the remaining space, and take the date before the time
+    #print(new_date)
+  }
+  levels(limited_dataset$year)[levels(limited_dataset$year) == date] <- new_date #wherever we were, update it
+}
+limited_dataset$year <- as.numeric(as.character(limited_dataset$year)) #and cast it as a numeric
+```
+
+## Data Extension, further cleaning
+
+Thanks to the meteorological institute, we can expand some of the information from the recclass label. The label corresponds with certain information regarding the composition and structure of the meteorite. This requires some minor [web](http://www.lpi.usra.edu/meteor/)scraping.
+
+```{r}
+#a vector of the unique classes in the classifications
+recclass_factors <- unique(limited_dataset$recclass)
+
+#attaching the classification to the url pulls up a webpage with the interesting information
+url_prefix <- "http://www.lpi.usra.edu/meteor/metbullclass.php?sea="
+
+#the unique extensions are the extended information for the unique classification - the cut extension is that information compacted into a more usable format
+if (!file.exists("cut_extensions.csv")){#simply comment this if you want to write the file anyway
+  unique_extensions <- vector(length=length(recclass_factors))
+  cut_extensions <- vector(length=length(recclass_factors))
+  for (f in 1:length(recclass_factors)){#for loop for scraping
+    url_full <- paste(url_prefix,recclass_factors[f],sep="")
+    url_full <- gsub(" ","",url_full)
+    #print(recclass_factors[f],max.levels=0)
+    webpage <- readLines(url_full)
+    html_extract <- webpage[grep(recclass_factors[f],webpage)][1]
+    plain_extract <- html_strip(html_extract) #helper function from meteor_helper.R
+    remove_this <- paste("The recommended classification ", recclass_factors[f], " means:\"",sep="")
+    unique_extensions[f] <- plain_extract
+    cut_extensions[f] <- extract_between(plain_extract,remove_this,"\\.") #another helper function from meteor_helper.R
+  }
+
+write.table(cut_extensions,file="cut_extensions.csv",sep=",")
+}else{
+  cut_extensions <- read.csv("cut_extensions.csv",header=FALSE)
+}
+
+# This code was used originally to help diagnose and fix some holes which were appearing in early iterations of the method above. Perhaps useful if further changes are made.
+if (FALSE){
+  fill_ins <- vector()
+  for (f in 1:length(cut_extensions)){
+    if (cut_extensions[f] == ""){
+      tmp <- paste(url_prefix,recclass_factors[f],sep="")
+      fill_ins <- c(fill_ins,gsub(" ","",tmp))
+      print(paste(f,": ",url_prefix,recclass_factors[f],sep=""))
+    }
+  }
+}
+```
+
+Ultimately, I fixed up the data in excel, and was forced to make some adjustments to some of the categories to avoid an explosion in dimensionality. I'll describe that process more in the end. 
+```{r}
+fixed_extensions <- read.table('fixed_extensions.csv',header=FALSE, sep=",", stringsAsFactors=FALSE)
+recclass_sorted <- recclass_factors[fixed_extensions$V1]
+str(fixed_extensions)
+```
+
+The scraping provides a whole new wealth of information which will allow for interesting analyses of the meteorite dataset. 
+ and now, we can generate a table for the extensions, which
+ will give us some awesome variables: 
+   (1) Meteorite Class (all entries),(factor)
+   (2) Secondary Class (only some entries),(factor)
+   (3) group (a further subsetting tool within classes,(factors)
+   (4) family (only some entries),(factors)
+   (5) chemical group (Iron meteorites only),(factors)
+   (6) petrologic type (Chondrites only),(integer:1-7)
+   (7) is breccia (all entries),(binary:0-1)
+   (8) petrologic class (Mesosiderites only),(factor)
+   (9) metamorphic grade (Mesosiderites only),(integer:1-4)
+   (10) martian type (Martian only),(factor)
+   (11) type of lithologies present (Lunar only),(factor)
+   (12) type of melting present (all entries),(factor)
+most of these designations may allow for subsetting and classification, perhaps more useful in future projects. 
+
+In this section, I apply this extended data to the old data.
+```{r}
+
+if (!file.exists("data_full.csv")){
+  #empty dataframe with the correct columns to be added to the old data
+  empty_df <- data.frame(ID=recclass_sorted,
+                         MeteorClass=fixed_extensions$V3,
+                         SecondClass=vector(mode='character',length=length(recclass_sorted)),
+                         Group=vector(mode='character',length=length(recclass_sorted)),
+                         Family=vector(mode='character',length=length(recclass_sorted)),
+                         ChemGroup=vector(mode='character',length=length(recclass_sorted)),
+                         PetroType=vector(mode='character',length=length(recclass_sorted)),
+                         Breccia=vector(mode='character',length=length(recclass_sorted)),
+                         PetroClass=vector(mode='character',length=length(recclass_sorted)),
+                         MetaGrade=vector(mode='character',length=length(recclass_sorted)),
+                         MarsType=vector(mode='character',length=length(recclass_sorted)),
+                         Lithol=vector(mode='character',length=length(recclass_sorted)),
+                         Melt=vector(mode='character',length=length(recclass_sorted)),
+                         Other=vector(mode='character',length=length(recclass_sorted)),
+                         stringsAsFactors=FALSE)
+  ext_df <- empty_df
+  # now, to fill it up
+  for (irow in 1:nrow(fixed_extensions)){
+    cat(paste("Row:",irow,"\n",sep=""))
+    for (icol in 4:ncol(fixed_extensions)){
+      key <- substr(fixed_extensions[irow,icol],1,regexpr(":",fixed_extensions[irow,icol])[1]-1)
+      val <- substr(fixed_extensions[irow,icol],regexpr(":",fixed_extensions[irow,icol])[1]+1,nchar(fixed_extensions[irow,icol]))
+      if (key != ""){
+        switch(key,
+               sec={ext_df[irow,]$SecondClass<-val},
+               group={ext_df[irow,]$Group<-val},
+               petrologictype={ext_df[irow,]$PetroType<-val},
+               family={ext_df[irow,]$Family<-val},
+               chemicalgroup={ext_df[irow,]$ChemGroup<-val},
+               breccia={ext_df[irow,]$Breccia<-val},
+               petrologicclass={ext_df[irow,]$PetroClass<-val},
+               metamorphicgrade={ext_df[irow,]$MetaGrade<-val},
+               type={ext_df[irow,]$MarsType<-val},
+               lithologies={ext_df[irow,]$Lithol<-val},
+               melt={ext_df[irow,]$Melt<-val},
+               other={ext_df[irow,]$Other<-val}
+        )
+      }
+    }
+  }
+  ext_df <- data.frame(lapply(ext_df,as.factor),stringsAsFactors=TRUE)
+  
+  # Now, to add this information to the original dataset...
+  new_extension <- data.frame()
+  for (irow in 1:nrow(limited_dataset)){
+    cat(paste("row:",irow,"\n",sep=""))
+    rows <-ext_df[ext_df$ID == limited_dataset[irow,]$recclass,]
+    new_extension <- rbind(new_extension,rows[1,])
+  }
+  beep()
+  data_full <- cbind(limited_dataset,new_extension)
+  write.table(new_full_extension,"data_full.csv",sep=",",row.names=FALSE)
+}else{
+  data_full <- read.csv("data_full.csv",header=TRUE)
+}
+
+str(data_full)
+summary(data_full)
+```
+
+Some further cleaning in excel was needed even after all of this. The provided dataset [data_full.csv]() is what we need. 
+
+## Analysis
+
+Before the analysis is done, I turn back to some of the original problems I posed in the beginning. Specifically, I look at what kind of questions we can pose. There are many, many interesting questions we could ask about this dataset. 
+Each of these questions will require specific subsetting, preprocessing, and analysis. 
+
+For now I just focus on a few possible questions:
+### Investigating Impacts over Time: 
+(Q1.1) Has one of the three centuries present experienced significantly more impacts? I have four centuries' worth of data - I might as well look if there's a relationship. I keep in mind that data-gathering techniques have changed significantly as well. 
+
+**Initial General Hypothesis**: The 20th century has experienced significantly more frequent meteorite impacts than other centures. (This is based on an expectation that data collection has been significantly better in this century than in others, and on the fact that the 21st century just hasn't lastedf as long - I want to demonstrate this possible bias of the data)
+
+Given that the data regarding the frequency of impacts is a rare-event, I can expect something like a poisson distribut ion from the frequencies. 
+First, the data needs to be properly subset and cleaned of rows with no date. 
+```{r}
+cent.data <- data_full[!is.na(data_full$year),]
+cent.data <- cent.data[cent.data$year > 1599,] #there are some records of older meteorites, but we don't want them
+cent.17 <- cent.data[cent.data$year < 1700,]
+cent.18 <- cent.data[cent.data$year < 1800 & cent.data$year >= 1700,]
+cent.19 <- cent.data[cent.data$year < 1900 & cent.data$year >= 1800,]
+cent.20 <- cent.data[cent.data$year < 2000 & cent.data$year >= 1900,]
+cent.21 <- cent.data[cent.data$year >= 2000 & cent.data$year,]
+```
+
+Frequency over the entire century needs to be counted, each century vector will have elements corresponding to individual years. The frequency for one year is just the number of impacts in that year.
+
+```{r}
+freq.count <- function(y,z){return(unlist(lapply(y,function(x){sum(x == z)})))}
+
+cent.17.freq <- freq.count(1600:1699,cent.17$year)
+cent.18.freq <- freq.count(1700:1799,cent.18$year)
+cent.19.freq <- freq.count(1800:1899,cent.19$year)
+cent.20.freq <- freq.count(1900:1999,cent.20$year)
+cent.21.freq <- freq.count(2000:2015,cent.21$year)
+```
+
+Now, I check the distributions of these frequencies. 
+
+```{r}
+plot(density(cent.data$year))
+abline(v=mean(cent.data$year))
+plot(density(cent.17.freq))
+abline(v=mean(cent.17.freq))
+plot(density(cent.18.freq))
+abline(v=mean(cent.18.freq))
+plot(density(cent.19.freq))
+abline(v=mean(cent.19.freq))
+plot(density(cent.20.freq))
+abline(v=mean(cent.20.freq))
+plot(density(cent.21.freq))
+abline(v=mean(cent.21.freq))
+```
+We can see from the plot over all years measured that a heavy frequency is unnormally clustered in the late 20th and early 21st centuries. If we treat the incidence of meteorite strikes as a poisson process, we see that the distribution of frequencies across each century looks somewhat poisson-like.
+Indeed, these look like rough poisson distributions with each century taking a different value for lambda. Unfortunately, just rough shape isn't enough to confirm __poisson-ness__. I use, instead, a goodness of fit test found in a Hoaglin book, and do 2 bootsraps:
+David C. Hoaglin (1980),
+"A Poissonness Plot",
+The American Statistician
+Vol. 34, No. 3 (Aug., ), pp. 146-149
+
+and
+
+Hoaglin, D. and J. Tukey (1985),
+"9. Checking the Shape of Discrete Distributions",
+Exploring Data Tables, Trends and Shapes,
+(Hoaglin, Mosteller & Tukey eds)
+John Wiley & Sons
+
+
+
+*21st century*:
+```{r}
+cent.21.boot <- boot(cent.21.freq,poissonness_plot ,R=2)
+```
+So, it looks like the model may be slightly overfit for the 21st century dataset. 
+
+*20th Century*
+```{r}
+cent.20.boot <- boot(cent.20.freq,statistic=poissonness_plot ,R=2)
+```
+It looks like this century is well-modelled by a poisson distribution. 
+I'm going to run this statistic through boot-strapping. 
+
+*19th century*
+```{r}
+#19th century
+cent.19.boot <- boot(cent.19.freq,statistic=poissonness_plot ,R=2)
+```
+The 19th century looks somewhat underfit by the model.
+
+*18th century*
+```{r}
+#18th century
+cent.18.boot <- boot(cent.18.freq,statistic=poissonness_plot ,R=2)
+```
+The 18th century looks grossly underfit by the model.
+
+*17th century*
+```{r}
+cent.17.boot <- boot(cent.17.freq,statistic=poissonness_plot ,R=2)
+```
+The 17th century also looks grossly underfit by the model.
+
+It looks like we might not lose too much if we try a poisson test between the 21st,20th,and 19th centuries. 
+ 
+Testing the null hypothesis that the poisson-rate of meteorite impacts in the 21st is less than 2x than of the 20th
+```{r}
+poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2,alternative="greater")
+```
+With this test alone, we might reject the null hypothesis, and say there is no evidence that the incidence rate is less than 2x of that in the 20th century.
+
+```{r}
+bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2)
+plot(bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2))
+```
+This gives us a strong indication that the incidence rate of meteor strikes in the 21st century is more than 2 times that of the 20th. I could experiment with some different rates to settle on a more exact relationship between the incidence rates, but this gives me enough to reject the initial hypothesis that the 20th century would in general have more incidences. 
+
+I test similar null hypotheses for the 21st century vs other centuries.
+**21st vs 19th**
+```{r}
+poisson.test(c(sum(cent.21.freq),sum(cent.19.freq)),c(length(cent.21.freq),length(cent.19.freq)),r=2,alternative="greater")
+bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2)
+plot(bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2))
+```
+This indicates a strong rejection of the null hypothesis. 
+
+And also, just throw another test in of the 20th vs the 19th. 
+**20th vs 19th**
+```{r}
+poisson.test(c(sum(cent.20.freq),sum(cent.19.freq)),c(length(cent.20.freq),length(cent.19.freq)),r=1.5,alternative="greater")
+bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2)
+plot(bayes.poisson.test(c(sum(cent.21.freq),sum(cent.20.freq)),c(length(cent.21.freq),length(cent.20.freq)),r=2))
+```
+Again, a strong rejection of the null hypothesis.
+
+#### Conclusions
+the results of running Poisson tests between the frequencies of impacts between the 19th-21st centuries indicates that there is no evidence that the 20th century demonstrated a greater rate of incidence than has been shown in the 21st thus far. Indeed, there is a 99% probability that the rate of incidence in the 21st century is greater than the rate of incidence in the 20th century, and a 99% probability that the rate of incidence in the 20th century in the is greater than the rate of incidience in the 19th. 
+More than anything, these results indicate a growing sophistication in the cataloguing of meteorite impacts. 
+
+### Investigating Mass of Impacts over Time: 
+(Q1.2) "Is there a correlation between time and mass of impacts?"
+Investigating whether or not there is a temporal trend between time and the mass of impacts. Have meteorite impacts been less massive as time has gone on, or more massive?
+
+**General Hypothesis**: There is no correlation. 
+
+I need to make sure that I'm working with complete data
+```{r}
+data.nona <- data_full[!is.na(data_full$mass),]
+data.nona <- data.nona[data.nona$mass > 0,]
+# I redo this from before, because we're not only looking for more frequent impacts, but more massive impacts
+cent.data <- data.nona[!is.na(data.nona$year),]
+cent.data <- cent.data[cent.data$year > 1799 & cent.data$year < 2015,] #there are some records of older meteorites, but we don't want 
+
+summary(cent.data$mass)
+plot(density(cent.data$mass))
+abline(v=mean(cent.data$mass))
+
+plot(cent.data$year ~ cent.data$mass)
+abline(v=mean(cent.data$mass),col="red")
+```
+Looking at these plots, it seems clear that there isn't a simple correlation between the year of the impacts and their mass; however, I may be able to remove some of the really massive outliers and find something worthwhile. I remove data greater than one-hundreth of the standard deviation away from the mean, and attempt to fit a linear regression to the trend.
+```{r}
+cent.data.less2sd <- cent.data[cent.data$mass < sd(cent.data$mass)/100,]
+
+summary(cent.data.less2sd$mass)
+plot(density(cent.data.less2sd$mass))
+abline(v=mean(cent.data.less2sd$mass),col="red")
+
+plot(cent.data.less2sd$mass ~ cent.data.less2sd$year)
+fit <- lm(mass ~ year,data = cent.data.less2sd)
+abline(fit,col="red")
+```
+Obviusly, the relationship is not linear. We try a general linear model. 
+
+```{r}
+# Quasi-Poisson
+plot(cent.data.less2sd$mass ~ cent.data.less2sd$year)
+fit <- glm(mass ~ year,data = cent.data.less2sd,family=quasipoisson)
+curve(predict(fit,data.frame(year=x),type="resp"),add=TRUE,col="red")
+
+cov.fit <- vcovHC(fit, type="HC0")
+std.err <- sqrt(diag(cov.fit))
+r.est <- cbind(Estimate= coef(fit), "Robust SE" = std.err,
+               "Pr(>|z|)" = 2 * pnorm(abs(coef(fit)/std.err), lower.tail=FALSE),
+               LL = coef(fit) - 1.96 * std.err,
+               UL = coef(fit) + 1.96 * std.err)
+with(fit, cbind(res.deviance = deviance, df = df.residual,
+               p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+
+```
+Again, this curve can't really well-model the relationship, it seems. Indeed, it seems that though there is an increase in the frequency of more massive meteorites, this can be chalked up to the increase of frequency of impacts over time (as a function, likely, of better catalouging) and not so much to a direct relationship between mass and time. 
+
+####Conclusion
+It is not clear from the evidence that there is a relationship between the year of the impact and the mass. It is not likely that we have been experiencing more massive impacts as time has increased. 
+
+## Projects for later
+
+Unfortunately, I am busy with a huge workload, including a continuation of my work with the Mind Research Network. I am primarily a coder and applied mathematician - my experience with statistics is limited; however, I think the problems I have investigated here are at least interesting in their descriptive value, and I think the cleaning and extension I've done of the original dataset will make any future investigations easier. Given the opportunity, I would like to continue working in greater detail with this dataset, but for the time being, I list a number of questions which might be investigated at a future time:
+
+### Investigating Impacts over Locations: 
+(Q3.1) has any location experienced significantly more frequent impacts?
+
+(Q3.2) has any location experienced significantly more massive impacts?
+### Investigating Correlation between Mass and Frequency of Impact: 
+(Q4.1) Is there a correlation between the mass and the frequency of impact? (e.g. if we decrease mass, do we increase frequency of impact)
+
+## Investigating questions of classification
+(QC1) Can you predict whether a meteorite is brecciated or unbrecciated based on its mass?
+(QC2) Can we reliably classify meteorites by their mass?
