@@ -1,0 +1,2 @@
+This is the TrainingResults file - the default output file.
+Love it now, it will soon be gone.
